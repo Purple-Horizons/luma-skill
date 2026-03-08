@@ -23,18 +23,29 @@ curl -s "https://public-api.luma.com/v1/<endpoint>" \
 - **Writes**: POST requests with JSON body
 - **IDs**: Event IDs start with `evt-`
 - **Dates**: ISO 8601 format (e.g., `2026-04-01T18:00:00Z`)
-- **Pagination**: Cursor-based — use `pagination_cursor`, `pagination_limit`; response includes `has_more` and `next_cursor`
+- **Pagination**: Cursor-based — use `pagination_cursor`, `pagination_limit` (default 50); response includes `has_more` and `next_cursor`. When counting totals (e.g., guest counts), you MUST loop through all pages until `has_more` is false — a single page only returns up to 50 entries.
+- **Sorting**: Use `sort_column` and `sort_direction` (asc/desc). For events, `sort_column=start_at` with `sort_direction=desc` gives newest first.
 - **Rate limits**: 500 GET / 100 POST per 5 minutes per calendar
 
 ## Events
 
 ### List events
 ```bash
+# List upcoming events (after today)
 curl -s -G "https://public-api.luma.com/v1/calendar/list-events" \
   -H "x-luma-api-key: $LUMA_API_KEY" \
-  --data-urlencode "after=2026-03-01T00:00:00Z" \
-  --data-urlencode "pagination_limit=10"
+  --data-urlencode "after=$(date -u +%Y-%m-%dT00:00:00Z)" \
+  --data-urlencode "pagination_limit=50"
+
+# Find most recent past event (sort descending, look before now)
+curl -s -G "https://public-api.luma.com/v1/calendar/list-events" \
+  -H "x-luma-api-key: $LUMA_API_KEY" \
+  --data-urlencode "before=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --data-urlencode "sort_direction=desc" \
+  --data-urlencode "pagination_limit=1"
 ```
+
+Params: `after`, `before` (ISO 8601 date filters), `sort_column` (only `start_at`), `sort_direction` (asc/desc), `pagination_limit`, `pagination_cursor`.
 
 ### Get event by ID
 ```bash
@@ -84,13 +95,23 @@ curl -s -X POST "https://public-api.luma.com/v1/event/cancel" \
 
 ### List guests for an event
 ```bash
+# Get all guests (no status filter = all statuses)
+curl -s -G "https://public-api.luma.com/v1/event/get-guests" \
+  -H "x-luma-api-key: $LUMA_API_KEY" \
+  --data-urlencode "event_id=evt-XXXXX"
+
+# Filter by specific status
 curl -s -G "https://public-api.luma.com/v1/event/get-guests" \
   -H "x-luma-api-key: $LUMA_API_KEY" \
   --data-urlencode "event_id=evt-XXXXX" \
-  --data-urlencode "approval_status=approved"
+  --data-urlencode "approval_status=waitlist"
 ```
 
-Filter by `approval_status`: approved, session, pending_approval, invited, declined, waitlist. Sort by: name, email, created_at, registered_at, checked_in_at.
+Filter by `approval_status`: approved, session, pending_approval, invited, declined, waitlist. Omit `approval_status` to get ALL guests regardless of status — this is the right approach for total RSVP counts.
+
+Sort by: name, email, created_at, registered_at, checked_in_at.
+
+**Counting guests**: The API returns max 50 per page. To get a total count, you must paginate: check `has_more` in the response, and if true, pass `next_cursor` as `pagination_cursor` in the next request. Keep looping until `has_more` is false, summing `len(entries)` from each page.
 
 ### Get a single guest
 ```bash
@@ -314,8 +335,27 @@ curl -s "https://public-api.luma.com/v1/lookup-entity?entity_type=event&entity_i
   -H "x-luma-api-key: $LUMA_API_KEY"
 ```
 
+## Common Workflows
+
+### Get upcoming events with RSVP counts
+1. List events with `after=<today>` to get upcoming events
+2. For each event, call `get-guests` WITHOUT `approval_status` filter (gets all guests)
+3. Paginate through all pages (check `has_more`, use `next_cursor`) to get accurate total
+4. Present as a table: event name, date, total RSVPs
+
+### Find most recent event and check its waitlist
+1. List events with `before=<now>` and `sort_direction=desc` and `pagination_limit=1`
+2. Take the first result — that's the most recent past event
+3. Call `get-guests` with `approval_status=waitlist` for that event
+
+### Get all people with their tags
+1. Call `list-person-tags` to get all available tags
+2. Call `list-people` with pagination to get all people
+3. Each person entry includes their assigned tag IDs — match against the tags list
+
 ## Notes
 - Cover images must be uploaded via `/v1/create-upload-url` first — only `https://images.lumacdn.com/...` URLs are accepted
 - `calendar/list-events` only returns events **managed by** the calendar, not events merely listed on it
-- Pagination: always check `has_more` and use `next_cursor` for subsequent pages
+- Pagination: always check `has_more` and use `next_cursor` for subsequent pages — many endpoints return max 50 items per page
 - All write operations use POST (even updates and deletes)
+- When the user asks about "the latest event" or "most recent event", use `before` + `sort_direction=desc` to find it — don't rely on the default sort order
